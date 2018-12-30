@@ -1,0 +1,78 @@
+# Reverse proxy configuration for IBM WebSphere
+#
+# Blog post about the request headers nginx needs to add to the upstream:
+# See: https://developer.ibm.com/wasdev/docs/nginx-websphere-application-server/
+#
+# Make sure the WebSphere server stops redirecting us back to the internal hostname:
+# See: https://developer.ibm.com/answers/questions/293608/why-does-websphere-app-url-get-rewritten-with-port/
+
+upstream unica-ssl {
+  zone unica-ssl 64k;
+  keepalive 8;
+
+  # This only works with nginx-plus, for the open source nginx you would
+  # need to compile in an extra sticky module.
+  #
+  # The size of the zone cache needs to be tweaked for how many sessions you
+  # are going to run with.
+  #
+  sticky learn
+          create=$upstream_cookie_JSESSIONID
+          lookup=$cookie_JSESSIONID
+          zone=client_sessions:1m;
+
+  server 192.168.10.10:9443 resolve weight=10 max_fails=3 fail_timeout=30 slow_start=30;
+  server 192.168.10.11:9443 resolve weight=10 max_fails=3 fail_timeout=30 slow_start=30;
+}
+
+# HTTPS SERVER
+server {
+  listen                  192.168.20.20:443 http2 ssl;
+
+  status_zone             websphere.example.org;
+  server_name             websphere.example.org;
+
+  # Replace these by real ones for your site name
+  ssl_certificate         ssl/wildcard_example.org/wildcard.example.org.crt;
+  ssl_certificate_key     ssl/wildcard_example.org/wildcard.example.org.key;
+
+  # If you have little traffic it's probably best to remove the buffer option
+  access_log              /var/log/nginx/websphere.example.org_access.log upstreamlog buffer=4k;
+  error_log               /var/log/nginx/websphere.example.org_error.log;
+
+  # You might not need this redirect
+  location = / {
+    return 301 $scheme://$host/unica/;
+  }
+
+  location / {
+
+    # Include our proxy configuration
+    include conf/proxy.conf;
+
+    proxy_pass https://unica-ssl;
+
+    # UNICA specific stuff
+    proxy_set_header "$WSSC" $scheme;
+    proxy_set_header "$WSPR" $server_protocol;
+    proxy_set_header "$WSRA" $remote_addr;
+    proxy_set_header "$WSRH" $host;
+    proxy_set_header "$WSRU" $remote_user";
+    proxy_set_header "$WSSN" $server_name;
+    proxy_set_header "$WSSP" $server_port;
+    proxy_set_header "$WSIS" $is_ssl;
+
+    # Note that these vars are only available if
+    # NGINX was built with SSL
+    proxy_set_header "$WSCC" $ssl_client_cert;
+    proxy_set_header "$WSCS" $ssl_cipher;
+    proxy_set_header "$WSSI" $ssl_session_id;
+
+    # No equivalent NGINX variable for these headers.
+    proxy_hide_header "$WSAT";
+    proxy_hide_header "$WSPT";
+    proxy_hide_header "$WSFO";
+
+    health_check uri=/ interval=5 fails=3 passes=2 match=status_ok;
+  }
+}
